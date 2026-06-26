@@ -33,7 +33,7 @@ from providers.tempmail import create_account, get_messages, extract_links
 
 
 # ── Config ────────────────────────────────────────────────────
-REGISTER_URL = "https://account.alibabacloud.com/sso/register.htm"
+REGISTER_URL = "https://account.alibabacloud.com/"
 DASHSCOPE_URL = "https://dashscope.console.aliyun.com"
 QWEN_HOME = "https://home.qwencloud.com"
 DEFAULT_PASSWORD = "masuk123!"
@@ -87,11 +87,12 @@ def wait_for_email_code(email_token: str, timeout: int = VERIFY_POLL_TIMEOUT) ->
 
 
 def find_and_click(driver, selectors: list[str], timeout: int = 10) -> bool:
-    """Try multiple CSS selectors, click the first match."""
+    """Try multiple selectors (CSS or XPath), click the first match."""
     for sel in selectors:
         try:
+            by = By.XPATH if sel.startswith("//") else By.CSS_SELECTOR
             el = WebDriverWait(driver, timeout).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
+                EC.element_to_be_clickable((by, sel))
             )
             el.click()
             return True
@@ -101,11 +102,12 @@ def find_and_click(driver, selectors: list[str], timeout: int = 10) -> bool:
 
 
 def find_and_fill(driver, selectors: list[str], value: str, timeout: int = 10) -> bool:
-    """Try multiple CSS selectors, fill the first match."""
+    """Try multiple selectors (CSS or XPath), fill the first match."""
     for sel in selectors:
         try:
+            by = By.XPATH if sel.startswith("//") else By.CSS_SELECTOR
             el = WebDriverWait(driver, timeout).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, sel))
+                EC.presence_of_element_located((by, sel))
             )
             el.clear()
             el.send_keys(value)
@@ -176,15 +178,15 @@ def register_account(driver, email: str, email_token: str, password: str, verbos
     if verbose:
         print(f"  [4/6] Sending verification code to {email}...")
     code_sent = find_and_click(driver, [
-        "button:has-text('Send')",
-        "button:has-text('Get')",
-        "button:has-text('Code')",
-        "button:has-text('发送')",
-        "button:has-text('获取')",
-        "a:has-text('Send')",
-        "a:has-text('Get')",
-        "a:has-text('Code')",
-        "a:has-text('发送')",
+        "//button[contains(text(), 'Send')]",
+        "//button[contains(text(), 'Get')]",
+        "//button[contains(text(), 'Code')]",
+        "//button[contains(text(), '发送')]",
+        "//button[contains(text(), '获取')]",
+        "//a[contains(text(), 'Send')]",
+        "//a[contains(text(), 'Get')]",
+        "//a[contains(text(), 'Code')]",
+        "//a[contains(text(), '发送')]",
         "[class*='send']",
         "[class*='code'] button",
         "[class*='verify'] button",
@@ -263,11 +265,11 @@ def register_account(driver, email: str, email_token: str, password: str, verbos
     submitted = find_and_click(driver, [
         "button[type='submit']",
         "input[type='submit']",
-        "button:has-text('Register')",
-        "button:has-text('Sign Up')",
-        "button:has-text('Create')",
-        "button:has-text('注册')",
-        "button:has-text('创建')",
+        "//button[contains(text(), 'Register')]",
+        "//button[contains(text(), 'Sign Up')]",
+        "//button[contains(text(), 'Create')]",
+        "//button[contains(text(), '注册')]",
+        "//button[contains(text(), '创建')]",
         "[class*='submit']",
         "[class*='register'] button",
     ], timeout=5)
@@ -319,10 +321,10 @@ def register_account(driver, email: str, email_token: str, password: str, verbos
 
         # Look for "Create API Key" button
         create_btn = find_and_click(driver, [
-            "button:has-text('Create')",
-            "button:has-text('新建')",
-            "button:has-text('Generate')",
-            "button:has-text('创建')",
+            "//button[contains(text(), 'Create')]",
+            "//button[contains(text(), '新建')]",
+            "//button[contains(text(), 'Generate')]",
+            "//button[contains(text(), '创建')]",
             "[class*='create']",
             "[class*='add']",
         ], timeout=8)
@@ -340,11 +342,11 @@ def register_account(driver, email: str, email_token: str, password: str, verbos
 
             # Confirm
             find_and_click(driver, [
-                "button:has-text('Confirm')",
-                "button:has-text('OK')",
-                "button:has-text('确定')",
-                "button:has-text('Create')",
-                "button:has-text('Submit')",
+                "//button[contains(text(), 'Confirm')]",
+                "//button[contains(text(), 'OK')]",
+                "//button[contains(text(), '确定')]",
+                "//button[contains(text(), 'Create')]",
+                "//button[contains(text(), 'Submit')]",
                 "button[type='submit']",
             ], timeout=3)
 
@@ -496,29 +498,3 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument("-o", "--output", default="output", help="Output directory")
     args = parser.parse_args()
-
-    print(f"\n🚀 Qwen Cloud Account Generator")
-    print(f"   Count: {args.count}")
-    print(f"   Mode: {'visible' if args.no_headless else 'headless'}")
-    print(f"   Output: {args.output}\n")
-
-    results = batch_register(
-        count=args.count,
-        password=args.password,
-        headless=not args.no_headless,
-        verbose=args.verbose,
-    )
-
-    json_path, txt_path, batch, key_count = save_batch(results, args.output)
-
-    ok = sum(1 for r in results if r["status"] == "success")
-    reg = sum(1 for r in results if r["status"] == "registered_no_key")
-    fail = sum(1 for r in results if r["status"] == "failed")
-
-    print(f"\n{'='*50}")
-    print(f"📊 Batch {batch} Results:")
-    print(f"   ✅ Success: {ok}  |  ⚠️ Registered: {reg}  |  ❌ Failed: {fail}")
-    print(f"   🔑 API Keys: {key_count}")
-    print(f"   📄 {json_path}")
-    print(f"   📝 {txt_path}")
-    print(f"{'='*50}\n")
