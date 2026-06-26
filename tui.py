@@ -723,7 +723,7 @@ def interactive_menu():
 def main():
     parser = argparse.ArgumentParser(description="auto-keys TUI")
     parser.add_argument("-c", "--count", type=int, help="Direct batch mode: number of accounts")
-    parser.add_argument("--password", default="masuk123!")
+    parser.add_argument("--password", default="AutoKey$2025Xyz")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("-o", "--output", default="output")
     args = parser.parse_args()

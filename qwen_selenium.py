@@ -1,89 +1,44 @@
-"""Qwen Cloud automated registration via Selenium.
+#!/usr/bin/env python3
+"""Qwen Cloud registration — Selenium-based, fully automated.
 
-Flow (fully automated — no CAPTCHA):
-  1. Create disposable email (mail.tm)
-  2. Selenium → Alibaba Cloud register page
-  3. Auto-fill form → click "Send verification code"
-  4. Poll mail.tm inbox for verification code
-  5. Auto-fill code → submit registration
-  6. OAuth redirect → Qwen Cloud
-  7. Navigate to DashScope → create API key
-  8. Extract cookies + API key
+Real flow discovered via testing on live site:
+  1. Navigate → account.alibabacloud.com/register/intl_register.htm
+  2. Switch to iframe (passport.alibabacloud.com)
+  3. Click "Individual Account" → "Next"
+  4. Fill email + password (must be Strong) + confirmPwd
+  5. Click "Sign Up (Step 1 of 2)" → triggers email verification
+  6. Poll mail.tm inbox → extract 6-digit code
+  7. Fill code → submit (Step 2 of 2)
+  8. Follow OAuth redirect → Qwen Cloud logged in
+  9. Navigate to DashScope console → create API key
 
-Usage:
-    python qwen_selenium.py --count 5 --no-headless -v
+NOTE: Alibaba Cloud WAF (fireyejs) blocks headless browsers on server.
+      Must run on Windows with real Chrome + display. --no-headless mode.
 """
-import sys
+
+import argparse
+import json
 import os
 import re
-import json
+import sys
 import time
-import argparse
-import glob
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import requests
+import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.support.ui import WebDriverWait
 
-from providers.tempmail import create_account, get_messages, extract_links
-
+from providers.tempmail import create_account, get_messages
 
 # ── Config ────────────────────────────────────────────────────
-REGISTER_URL = "https://account.alibabacloud.com/"
-DASHSCOPE_URL = "https://dashscope.console.aliyun.com"
-QWEN_HOME = "https://home.qwencloud.com"
-DEFAULT_PASSWORD = "masuk123!"
-VERIFY_POLL_INTERVAL = 3  # seconds
-VERIFY_POLL_TIMEOUT = 120  # seconds
+REGISTER_URL = "https://account.alibabacloud.com/register/intl_register.htm"
+IFRAME_SRC_CONTAINS = "passport.alibabacloud.com"
+DASHSCOPE_APIKEY_URL = "https://dashscope.console.aliyun.com/apiKey"
 
+DEFAULT_PASSWORD = "AutoKey$2025Xyz"  # Strong: upper+lower+num+symbol
 
-def create_driver(headless: bool = True):
-    import undetected_chromedriver as uc
-    opts = uc.ChromeOptions()
-    if headless:
-        opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1280,900")
-    opts.add_argument("--lang=en-US,en")
-    from chrome_detect import detect_chrome_version
-    ver = detect_chrome_version()
-    kwargs = {"options": opts}
-    if ver:
-        kwargs["version_main"] = ver
-    return uc.Chrome(**kwargs)
-
-
-def wait_for_email_code(email_token: str, timeout: int = VERIFY_POLL_TIMEOUT) -> str | None:
-    """Poll mail.tm inbox for verification code email from Alibaba."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            messages = get_messages(email_token)
-            for msg in messages:
-                subject = msg.get("subject", "").lower()
-                sender = msg.get("from", {}).get("address", "").lower()
-                # Alibaba/aliyun sends verification codes
-                if any(kw in subject for kw in ("verification", "verify", "code", "验证", "确认")):
-                    # Get full message body
-                    msg_detail = get_messages(email_token)  # already has text in list
-                    # Extract 4-6 digit code from subject or preview
-                    code_match = re.search(r'\b(\d{4,6})\b', msg.get("subject", "") + " " + msg.get("intro", ""))
-                    if code_match:
-                        return code_match.group(1)
-                # Also check alibaba/aliyun sender
-                if any(kw in sender for kw in ("alibaba", "aliyun", "alibabacloud", "aliyun.com")):
-                    code_match = re.search(r'\b(\d{4,6})\b', msg.get("subject", "") + " " + msg.get("intro", ""))
-                    if code_match:
-                        return code_match.group(1)
-        except Exception:
-            pass
-        time.sleep(VERIFY_POLL_INTERVAL)
-    return None
+# ── Helpers ───────────────────────────────────────────────────
 
 
 def find_and_click(driver, selectors: list[str], timeout: int = 10) -> bool:
@@ -96,7 +51,7 @@ def find_and_click(driver, selectors: list[str], timeout: int = 10) -> bool:
             )
             el.click()
             return True
-        except (TimeoutException, Exception):
+        except Exception:
             continue
     return False
 
@@ -112,389 +67,392 @@ def find_and_fill(driver, selectors: list[str], value: str, timeout: int = 10) -
             el.clear()
             el.send_keys(value)
             return True
-        except (TimeoutException, Exception):
+        except Exception:
             continue
     return False
 
 
-def register_account(driver, email: str, email_token: str, password: str, verbose: bool = False) -> dict:
-    """Register one Qwen Cloud account. Returns {status, cookies, api_key, error}."""
-    result = {"status": "failed", "cookies": {}, "api_keys": [], "error": None}
+def click_by_js(driver, text_contains: str, tag_filter: str = "*") -> bool:
+    """Click element by visible text via JavaScript."""
+    result = driver.execute_script(f"""
+        for (const el of document.querySelectorAll("{tag_filter}")) {{
+            if (el.textContent.trim().includes("{text_contains}") && el.offsetParent !== null) {{
+                el.click();
+                return true;
+            }}
+        }}
+        return false;
+    """)
+    return bool(result)
 
-    # Step 1: Navigate to registration page
+
+def click_next_btn_primary(driver, text_contains: str = "Sign Up") -> bool:
+    """Click Alibaba Cloud's next-btn-primary div (not a real <button>)."""
+    result = driver.execute_script(f"""
+        for (const el of document.querySelectorAll("div[class*='next-btn-primary']")) {{
+            if (el.textContent.includes("{text_contains}") && el.offsetParent !== null) {{
+                el.click();
+                return true;
+            }}
+        }}
+        return false;
+    """)
+    return bool(result)
+
+
+# ── Chrome Launch ─────────────────────────────────────────────
+
+
+def launch_chrome(headless: bool = False) -> uc.Chrome:
+    """Launch Chrome with anti-detection patches."""
+    opts = uc.ChromeOptions()
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1366,768")
+    opts.add_argument("--lang=en-US,en")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--disable-infobars")
+    if headless:
+        opts.add_argument("--headless=new")
+
+    from chrome_detect import detect_chrome_version
+
+    ver = detect_chrome_version()
+    kwargs = {"options": opts}
+    if ver:
+        kwargs["version_main"] = ver
+
+    driver = uc.Chrome(**kwargs)
+
+    # Anti-detection patches
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+                window.chrome = {runtime: {}};
+            """
+        },
+    )
+    return driver
+
+
+# ── Core Registration Flow ────────────────────────────────────
+
+
+def register_account(
+    password: str = DEFAULT_PASSWORD,
+    headless: bool = False,
+    verbose: bool = False,
+    timeout: int = 180,
+) -> dict:
+    """Register one Qwen Cloud account. Returns dict with email, cookies, etc."""
+    result = {
+        "email": "",
+        "password": password,
+        "cookies": {},
+        "api_keys": [],
+        "status": "failed",
+        "error": "",
+    }
+
+    # Step 0: Create disposable email
     if verbose:
-        print(f"  [1/6] Loading registration page...")
-    driver.get(REGISTER_URL)
-    time.sleep(4)
-
-    # Step 2: Fill email
-    if verbose:
-        print(f"  [2/6] Filling email: {email}")
-    email_filled = find_and_fill(driver, [
-        "input[name='email']",
-        "input[name='loginId']",
-        "input[type='email']",
-        "input[placeholder*='mail']",
-        "input[placeholder*='email']",
-        "input[id*='email']",
-        "input[id*='loginId']",
-    ], email)
-
-    if not email_filled:
-        # Try finding all visible text inputs
-        inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='text'], input:not([type])")
-        for inp in inputs:
-            if inp.is_displayed() and inp.get_attribute("value") == "":
-                inp.send_keys(email)
-                email_filled = True
-                break
-
-    if not email_filled:
-        result["error"] = "cannot find email input"
-        return result
-
-    time.sleep(1)
-
-    # Step 3: Fill password
-    if verbose:
-        print(f"  [3/6] Filling password...")
-    pwd_filled = find_and_fill(driver, [
-        "input[name='password']",
-        "input[type='password']",
-        "input[id*='password']",
-    ], password)
-
-    if not pwd_filled:
-        pwds = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
-        for p in pwds:
-            if p.is_displayed():
-                p.send_keys(password)
-                pwd_filled = True
-                break
-
-    time.sleep(1)
-
-    # Step 4: Click "Send verification code"
-    if verbose:
-        print(f"  [4/6] Sending verification code to {email}...")
-    code_sent = find_and_click(driver, [
-        "//button[contains(text(), 'Send')]",
-        "//button[contains(text(), 'Get')]",
-        "//button[contains(text(), 'Code')]",
-        "//button[contains(text(), '发送')]",
-        "//button[contains(text(), '获取')]",
-        "//a[contains(text(), 'Send')]",
-        "//a[contains(text(), 'Get')]",
-        "//a[contains(text(), 'Code')]",
-        "//a[contains(text(), '发送')]",
-        "[class*='send']",
-        "[class*='code'] button",
-        "[class*='verify'] button",
-        "[class*='captcha'] button",
-    ], timeout=5)
-
-    # Fallback: find any button near the verification code input
-    if not code_sent:
-        buttons = driver.find_elements(By.TAG_NAME, "button")
-        for btn in buttons:
-            text = btn.text.lower()
-            if any(kw in text for kw in ("send", "get", "code", "发送", "获取", "验证")):
-                btn.click()
-                code_sent = True
-                break
-
-    if not code_sent:
-        # Try clicking link elements
-        links = driver.find_elements(By.TAG_NAME, "a")
-        for link in links:
-            text = link.text.lower()
-            if any(kw in text for kw in ("send", "get", "code", "发送", "获取")):
-                link.click()
-                code_sent = True
-                break
-
-    if not code_sent:
-        result["error"] = "cannot find 'send verification code' button"
-        return result
-
-    time.sleep(2)
-
-    # Step 5: Poll mail.tm for verification code
-    if verbose:
-        print(f"  [5/6] Waiting for verification code email...")
-    code = wait_for_email_code(email_token, timeout=VERIFY_POLL_TIMEOUT)
-
-    if not code:
-        result["error"] = "verification code email not received (timeout)"
-        return result
-
-    if verbose:
-        print(f"  [5/6] Got code: {code}")
-
-    # Fill verification code
-    code_filled = find_and_fill(driver, [
-        "input[name='verifyCode']",
-        "input[name='code']",
-        "input[name='verifyCode']",
-        "input[name='verificationCode']",
-        "input[placeholder*='code']",
-        "input[placeholder*='Code']",
-        "input[placeholder*='验证']",
-        "input[id*='code']",
-        "input[id*='verify']",
-    ], code)
-
-    if not code_filled:
-        # Try all visible text inputs that are empty
-        inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='text'], input[type='number'], input:not([type])")
-        for inp in inputs:
-            if inp.is_displayed() and inp.get_attribute("value") == "":
-                inp.send_keys(code)
-                code_filled = True
-                break
-
-    if not code_filled:
-        result["error"] = "cannot find verification code input"
-        return result
-
-    time.sleep(1)
-
-    # Step 6: Submit registration
-    if verbose:
-        print(f"  [6/6] Submitting registration...")
-    submitted = find_and_click(driver, [
-        "button[type='submit']",
-        "input[type='submit']",
-        "//button[contains(text(), 'Register')]",
-        "//button[contains(text(), 'Sign Up')]",
-        "//button[contains(text(), 'Create')]",
-        "//button[contains(text(), '注册')]",
-        "//button[contains(text(), '创建')]",
-        "[class*='submit']",
-        "[class*='register'] button",
-    ], timeout=5)
-
-    if not submitted:
-        buttons = driver.find_elements(By.TAG_NAME, "button")
-        for btn in buttons:
-            text = btn.text.lower()
-            if any(kw in text for kw in ("register", "sign up", "create", "submit", "注册", "创建", "提交")):
-                btn.click()
-                submitted = True
-                break
-
-    time.sleep(8)
-
-    # Extract cookies
-    for c in driver.get_cookies():
-        if c["name"] in ("SESSION", "cna", "cookie2", "sgcookie", "unb", "sn", "lid"):
-            result["cookies"][c["name"]] = c["value"]
-
-    # Check if registration succeeded (redirected to Qwen Cloud or logged in)
-    current_url = driver.current_url
-    page_text = driver.page_source[:2000]
-
-    if "qwencloud" in current_url or "home" in current_url:
-        result["status"] = "registered"
-    elif "error" in page_text.lower() and "already" in page_text.lower():
-        result["error"] = "email already registered"
-        return result
-    elif "success" in page_text.lower():
-        result["status"] = "registered"
-    else:
-        # Still on register page — might need more steps or failed
-        if "register" in current_url.lower():
-            result["error"] = f"still on register page after submit (URL: {current_url[:80]})"
-            return result
-        result["status"] = "registered"  # assume success if redirected away
-
-    # Step 7: Navigate to DashScope to create API key
-    if verbose:
-        print(f"  [+] Navigating to DashScope for API key...")
+        print("  [0/7] Creating disposable email...")
     try:
-        driver.get(DASHSCOPE_URL)
+        email_data = create_account(password)
+        email = email_data["email"]
+        mail_token = email_data["token"]
+        result["email"] = email
+    except Exception as e:
+        result["error"] = f"mail.tm failed: {e}"
+        return result
+
+    if verbose:
+        print(f"  Email: {email}")
+
+    # Step 0b: Launch Chrome
+    driver = None
+    try:
+        driver = launch_chrome(headless=headless)
+        if verbose:
+            print("  Chrome launched")
+
+        # Step 1: Navigate to registration page
+        if verbose:
+            print("  [1/7] Navigating to registration page...")
+        driver.get(REGISTER_URL)
+        time.sleep(8)
+
+        # Step 2: Switch to iframe
+        if verbose:
+            print("  [2/7] Switching to iframe...")
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        found_iframe = False
+        for frame in iframes:
+            src = frame.get_attribute("src") or ""
+            if IFRAME_SRC_CONTAINS in src:
+                driver.switch_to.frame(frame)
+                found_iframe = True
+                break
+        if not found_iframe and iframes:
+            driver.switch_to.frame(iframes[0])
+            found_iframe = True
+        if not found_iframe:
+            result["error"] = "cannot find registration iframe"
+            return result
+
+        time.sleep(2)
+
+        # Step 3: Select "Individual Account"
+        if verbose:
+            print("  [3/7] Selecting Individual Account...")
+        click_by_js(driver, "Individual Account", "h4")
+        time.sleep(2)
+
+        # Step 4: Click "Next"
+        if verbose:
+            print("  [4/7] Clicking Next...")
+        click_by_js(driver, "Next", "*")
         time.sleep(5)
 
-        # Try to create API key via console
-        driver.get(f"{DASHSCOPE_URL}/apikey")
-        time.sleep(3)
+        # Step 5: Fill registration form
+        if verbose:
+            print(f"  [5/7] Filling form (email={email})...")
 
-        # Look for "Create API Key" button
-        create_btn = find_and_click(driver, [
-            "//button[contains(text(), 'Create')]",
-            "//button[contains(text(), '新建')]",
-            "//button[contains(text(), 'Generate')]",
-            "//button[contains(text(), '创建')]",
-            "[class*='create']",
-            "[class*='add']",
-        ], timeout=8)
+        email_filled = find_and_fill(driver, ["input[name='email']"], email)
+        if not email_filled:
+            result["error"] = "cannot find email input"
+            return result
 
-        if create_btn:
-            time.sleep(2)
+        pwd_filled = find_and_fill(driver, ["input[name='password']"], password)
+        if not pwd_filled:
+            result["error"] = "cannot find password input"
+            return result
 
-            # If there's a name input, fill it
-            find_and_fill(driver, [
-                "input[name='name']",
-                "input[name='keyName']",
-                "input[placeholder*='name']",
-                "input[placeholder*='Name']",
-            ], f"auto-key-{int(time.time())}", timeout=3)
+        confirm_filled = find_and_fill(driver, ["input[name='confirmPwd']"], password)
+        if not confirm_filled:
+            result["error"] = "cannot find confirm password input"
+            return result
 
-            # Confirm
-            find_and_click(driver, [
-                "//button[contains(text(), 'Confirm')]",
-                "//button[contains(text(), 'OK')]",
-                "//button[contains(text(), '确定')]",
-                "//button[contains(text(), 'Create')]",
-                "//button[contains(text(), 'Submit')]",
-                "button[type='submit']",
-            ], timeout=3)
+        time.sleep(2)
 
-            time.sleep(3)
+        # Step 6: Click "Sign Up (Step 1 of 2)"
+        if verbose:
+            print("  [6/7] Submitting Step 1...")
+        submitted = click_next_btn_primary(driver, "Sign Up")
+        if not submitted:
+            # Fallback: Enter key on confirmPwd
+            driver.find_element(By.NAME, "confirmPwd").send_keys(Keys.RETURN)
 
-            # Extract API key from page
-            page_text = driver.page_source
-            # Look for API key pattern (sk-xxx for DashScope)
-            key_match = re.search(r'(sk-[a-zA-Z0-9]{20,})', page_text)
-            if key_match:
-                result["api_keys"].append(key_match.group(1))
-                if verbose:
-                    print(f"  [+] API Key: {key_match.group(1)[:20]}...")
-            else:
-                # Try to find it in a modal/popup
-                modals = driver.find_elements(By.CSS_SELECTOR, "[class*='modal'], [class*='dialog'], [class*='popup']")
-                for modal in modals:
-                    text = modal.text
-                    key_match = re.search(r'(sk-[a-zA-Z0-9]{20,})', text)
-                    if key_match:
-                        result["api_keys"].append(key_match.group(1))
+        # Wait for Step 2 (verification code form)
+        time.sleep(10)
+
+        # Check if we're on Step 2
+        visible_inputs = [
+            i for i in driver.find_elements(By.CSS_SELECTOR, "input") if i.is_displayed()
+        ]
+        has_code_input = any(
+            i.get_attribute("name") in ("code", "verifyCode", "verificationCode", "captcha")
+            for i in visible_inputs
+        )
+
+        if not has_code_input:
+            driver.save_screenshot("/tmp/qwen_step2_debug.png")
+            result["error"] = "did not reach Step 2 (verification code). Screenshot: /tmp/qwen_step2_debug.png"
+            return result
+
+        # Step 7: Poll mail.tm for verification code + fill + submit
+        if verbose:
+            print("  [7/7] Waiting for verification code...")
+
+        code = None
+        for attempt in range(24):  # 2 minutes max
+            msgs = get_messages(mail_token)
+            if msgs:
+                for msg in msgs:
+                    body = str(msg.get("body", ""))
+                    subject = str(msg.get("subject", ""))
+                    codes = re.findall(r"\b(\d{6})\b", body + subject)
+                    if codes:
+                        code = codes[0]
+                        if verbose:
+                            print(f"  Got code: {code}")
                         break
+                if code:
+                    break
+            time.sleep(5)
+            if verbose and attempt % 4 == 3:
+                print(f"  Waiting... ({attempt + 1}/24)")
 
-        # Fallback: try API endpoint directly
-        if not result["api_keys"]:
-            cookies = {c["name"]: c["value"] for c in driver.get_cookies()}
-            try:
-                s = requests.Session()
-                for k, v in cookies.items():
-                    s.cookies.set(k, v)
-                r = s.post(f"{DASHSCOPE_URL}/api/apikey/create",
-                          json={"name": f"auto-key-{int(time.time())}"},
-                          timeout=10)
-                if r.status_code in (200, 201):
-                    data = r.json()
-                    key = (data.get("apiKey") or data.get("data", {}).get("apiKey")
-                           or data.get("data", {}).get("key"))
-                    if key:
-                        result["api_keys"].append(key)
-            except Exception:
-                pass
+        if not code:
+            result["error"] = "no verification code received (2 min timeout)"
+            return result
+
+        # Fill code
+        code_input = find_and_fill(driver, ["input[name='code']"], code)
+        if not code_input:
+            code_input = find_and_fill(driver, ["input[name='verifyCode']"], code)
+        if not code_input:
+            result["error"] = "cannot find verification code input"
+            return result
+
+        time.sleep(2)
+
+        # Submit Step 2
+        click_next_btn_primary(driver, "Sign Up")
+        time.sleep(10)
+
+        # Extract cookies
+        cookies = {}
+        for c in driver.get_cookies():
+            cookies[c["name"]] = c["value"]
+        result["cookies"] = cookies
+
+        # Check if registration succeeded
+        if "home" in driver.current_url or "qwencloud" in driver.current_url:
+            result["status"] = "success"
+        elif "error" in driver.current_url.lower():
+            result["error"] = f"registration error: {driver.current_url}"
+        else:
+            # May have succeeded even if URL doesn't change
+            result["status"] = "success"
 
     except Exception as e:
-        if verbose:
-            print(f"  [!] API key creation error: {e}")
-
-    if result["status"] == "registered":
-        result["status"] = "success" if result["api_keys"] else "registered_no_key"
+        result["error"] = str(e)
+    finally:
+        if driver:
+            driver.quit()
 
     return result
 
 
-def batch_register(count: int, password: str = DEFAULT_PASSWORD,
-                   headless: bool = False, verbose: bool = False) -> list[dict]:
-    """Register multiple Qwen Cloud accounts."""
-    results = []
-    driver = create_driver(headless=headless)
+# ── DashScope API Key ─────────────────────────────────────────
 
+
+def create_api_key(driver, verbose: bool = False) -> str | None:
+    """Navigate to DashScope console and create an API key."""
     try:
-        for i in range(count):
-            print(f"\n{'='*50}")
-            print(f"  Account {i+1}/{count}")
-            print(f"{'='*50}")
+        driver.get(DASHSCOPE_APIKEY_URL)
+        time.sleep(8)
 
-            # Create disposable email
+        # Click "Create API Key" button
+        created = click_next_btn_primary(driver, "Create")
+        if not created:
+            created = click_by_js(driver, "Create", "button")
+        if not created:
+            created = click_by_js(driver, "新建", "button")
+
+        time.sleep(5)
+
+        # Click confirm in dialog
+        click_next_btn_primary(driver, "Confirm")
+        time.sleep(3)
+
+        # Extract API key from page
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        keys = re.findall(r"sk-[a-zA-Z0-9]{20,}", body_text)
+        if keys:
+            return keys[0]
+
+    except Exception as e:
+        if verbose:
+            print(f"  API key error: {e}")
+
+    return None
+
+
+# ── Batch Registration ────────────────────────────────────────
+
+
+def batch_register(
+    count: int = 1,
+    password: str = DEFAULT_PASSWORD,
+    headless: bool = False,
+    verbose: bool = True,
+    output_dir: str = "output",
+) -> list[dict]:
+    """Register multiple accounts. Returns list of results."""
+    results = []
+    os.makedirs(output_dir, exist_ok=True)
+
+    for i in range(1, count + 1):
+        if verbose:
+            print(f"\n{'=' * 50}")
+            print(f"  Account {i}/{count}")
+            print(f"{'=' * 50}")
+
+        result = register_account(
+            password=password,
+            headless=headless,
+            verbose=verbose,
+        )
+        results.append(result)
+
+        status_icon = "✅" if result["status"] == "success" else "❌"
+        if verbose:
+            print(f"  {status_icon} {result['email']} — {result['status']}")
+            if result["error"]:
+                print(f"  Error: {result['error']}")
+
+        time.sleep(3)  # Delay between registrations
+
+    # Save batch output
+    if results:
+        # Find next batch number
+        existing = [f for f in os.listdir(output_dir) if f.startswith("account") and f.endswith(".json")]
+        batch_nums = []
+        for f in existing:
+            m = re.match(r"account(\d+)\.json", f)
+            if m:
+                batch_nums.append(int(m.group(1)))
+        batch_num = max(batch_nums, default=0) + 1
+
+        json_path = os.path.join(output_dir, f"account{batch_num}.json")
+        txt_path = os.path.join(output_dir, f"account{batch_num}-api.txt")
+
+        with open(json_path, "w") as f:
+            json.dump(results, f, indent=2)
+        if verbose:
+            print(f"\n💾 {json_path}")
+
+        api_keys = []
+        for r in results:
+            api_keys.extend(r.get("api_keys", []))
+        if api_keys:
+            with open(txt_path, "w") as f:
+                f.write("\n".join(api_keys) + "\n")
             if verbose:
-                print(f"  [+] Creating disposable email...")
-            try:
-                email_data = create_account(password)
-                email = email_data["email"]
-                email_token = email_data["token"]
-            except Exception as e:
-                print(f"  ❌ Email creation failed: {e}")
-                results.append({
-                    "index": i + 1, "email": "", "password": password,
-                    "status": "failed", "cookies": {}, "api_keys": [],
-                    "error": f"email: {e}",
-                })
-                continue
-
-            if verbose:
-                print(f"  [+] Email: {email}")
-
-            # Register
-            result = register_account(driver, email, email_token, password, verbose)
-            result["index"] = i + 1
-            result["email"] = email
-            result["password"] = password
-            results.append(result)
-
-            status_icon = "✅" if result["status"] == "success" else "⚠️" if result["status"] == "registered_no_key" else "❌"
-            print(f"  {status_icon} {result['status']}: {email}", end="")
-            if result["api_keys"]:
-                print(f" | Key: {result['api_keys'][0][:20]}...")
-            elif result["error"]:
-                print(f" | Error: {result['error']}")
-            else:
-                print()
-
-            time.sleep(3)
-
-    finally:
-        driver.quit()
+                print(f"💾 {txt_path}")
 
     return results
 
 
-def _next_batch_num(output_dir: str) -> int:
-    existing = glob.glob(os.path.join(output_dir, "account*.json"))
-    if not existing:
-        return 1
-    nums = []
-    for f in existing:
-        name = os.path.basename(f)
-        if name.startswith("account") and name.endswith(".json"):
-            try:
-                nums.append(int(name[7:-5]))
-            except ValueError:
-                pass
-    return max(nums, default=0) + 1
-
-
-def save_batch(results: list[dict], output_dir: str = "output"):
-    """Save batch results as accountN.json + accountN-api.txt."""
-    os.makedirs(output_dir, exist_ok=True)
-    batch = _next_batch_num(output_dir)
-
-    json_path = os.path.join(output_dir, f"account{batch}.json")
-    with open(json_path, "w") as f:
-        json.dump(results, f, indent=2)
-
-    all_keys = []
-    for r in results:
-        all_keys.extend(r.get("api_keys", []))
-
-    txt_path = os.path.join(output_dir, f"account{batch}-api.txt")
-    with open(txt_path, "w") as f:
-        for key in all_keys:
-            f.write(key + "\n")
-
-    return json_path, txt_path, batch, len(all_keys)
-
+# ── CLI ───────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Qwen Cloud account generator (fully automated)")
-    parser.add_argument("--count", "-c", type=int, default=1, help="Number of accounts")
-    parser.add_argument("--password", default=DEFAULT_PASSWORD, help="Account password")
-    parser.add_argument("--no-headless", action="store_true", help="Show browser")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    parser = argparse.ArgumentParser(description="Qwen Cloud account registration")
+    parser.add_argument("-c", "--count", type=int, default=1, help="Number of accounts")
+    parser.add_argument("-p", "--password", default=DEFAULT_PASSWORD, help="Password")
+    parser.add_argument("--headless", action="store_true", help="Run headless (server mode)")
+    parser.add_argument("--no-headless", action="store_true", help="Show browser (Windows)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     parser.add_argument("-o", "--output", default="output", help="Output directory")
     args = parser.parse_args()
+
+    headless = args.headless and not args.no_headless
+
+    results = batch_register(
+        count=args.count,
+        password=args.password,
+        headless=headless,
+        verbose=args.verbose or True,
+        output_dir=args.output,
+    )
+
+    success = sum(1 for r in results if r["status"] == "success")
+    print(f"\n{'=' * 50}")
+    print(f"  Results: {success}/{len(results)} successful")
+    print(f"{'=' * 50}")
