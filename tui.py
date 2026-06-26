@@ -411,32 +411,33 @@ def run_pipeline_cookies(accounts: list[Account], cookies_file: str):
 
 
 # ── Output ────────────────────────────────────────────────────
-def save_outputs(accounts: list[Account], output_dir: str):
-    """Save per-account JSON + TXT + combined summary."""
-    os.makedirs(output_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+def _next_batch_num(output_dir: str) -> int:
+    """Find next batch number by scanning existing accountN.json files."""
+    import glob
+    existing = glob.glob(os.path.join(output_dir, "account*.json"))
+    if not existing:
+        return 1
+    nums = []
+    for f in existing:
+        name = os.path.basename(f)
+        # match account1.json, account2.json, etc.
+        if name.startswith("account") and name.endswith(".json"):
+            try:
+                n = int(name[7:-5])
+                nums.append(n)
+            except ValueError:
+                pass
+    return max(nums, default=0) + 1
 
-    saved_json = []
-    saved_txt = []
+
+def save_outputs(accounts: list[Account], output_dir: str):
+    """Save 1 batch: accountN.json (all accounts) + accountN-api.txt (all keys)."""
+    os.makedirs(output_dir, exist_ok=True)
+    batch = _next_batch_num(output_dir)
+
     all_keys = []
     all_data = []
-
     for acc in accounts:
-        if acc.status != Status.SUCCESS:
-            # Still save failed accounts in combined, but skip per-account
-            all_data.append({
-                "email": acc.email,
-                "password": acc.password,
-                "cookies": acc.cookies,
-                "api_keys": acc.api_keys,
-                "created_at": acc.created_at,
-                "status": acc.status.value,
-                "ultraspeed": acc.status == Status.SUCCESS,
-                "error": acc.error or None,
-            })
-            all_keys.extend(acc.api_keys)
-            continue
-
         entry = {
             "email": acc.email,
             "password": acc.password,
@@ -444,37 +445,24 @@ def save_outputs(accounts: list[Account], output_dir: str):
             "api_keys": acc.api_keys,
             "created_at": acc.created_at,
             "status": acc.status.value,
-            "ultraspeed": True,
-            "error": None,
+            "ultraspeed": acc.status == Status.SUCCESS,
+            "error": acc.error or None,
         }
         all_data.append(entry)
+        all_keys.extend(acc.api_keys)
 
-        # Per-account JSON
-        json_path = os.path.join(output_dir, f"account{acc.index}.json")
-        with open(json_path, "w") as f:
-            json.dump(entry, f, indent=2)
-        saved_json.append(json_path)
-
-        # Per-account API key TXT
-        if acc.api_keys:
-            txt_path = os.path.join(output_dir, f"account-api{acc.index}.txt")
-            with open(txt_path, "w") as f:
-                for key in acc.api_keys:
-                    f.write(key + "\n")
-            saved_txt.append(txt_path)
-            all_keys.extend(acc.api_keys)
-
-    # Combined summary
-    summary_path = os.path.join(output_dir, f"summary_{ts}.json")
-    with open(summary_path, "w") as f:
+    # accountN.json — semua akun dalam 1 batch
+    json_path = os.path.join(output_dir, f"account{batch}.json")
+    with open(json_path, "w") as f:
         json.dump(all_data, f, indent=2)
 
-    all_keys_path = os.path.join(output_dir, f"all_api_keys_{ts}.txt")
-    with open(all_keys_path, "w") as f:
+    # accountN-api.txt — semua API keys dalam 1 file
+    txt_path = os.path.join(output_dir, f"account{batch}-api.txt")
+    with open(txt_path, "w") as f:
         for key in all_keys:
             f.write(key + "\n")
 
-    return saved_json, saved_txt, summary_path, all_keys_path, len(all_keys)
+    return json_path, txt_path, batch, len(all_keys)
 
 
 # ── Entry point ───────────────────────────────────────────────
@@ -543,7 +531,7 @@ def main():
         time.sleep(1)
 
     # Save outputs
-    saved_json, saved_txt, summary_path, all_keys_path, key_count = save_outputs(accounts, args.output)
+    json_path, txt_path, batch_num, key_count = save_outputs(accounts, args.output)
 
     # Final summary
     console.print()
@@ -554,9 +542,8 @@ def main():
     console.print(Panel(
         f"[green]✅ Success: {ok}[/green]  |  [red]❌ Failed: {fail}[/red]  |  [cyan]🔑 API Keys: {key_count}[/cyan]\n"
         f"[dim]⏱  {elapsed:.0f}s total[/dim]\n\n"
-        f"📄 Per-account: {len(saved_json)} JSON + {len(saved_txt)} TXT\n"
-        f"📋 Summary: {summary_path}\n"
-        f"📝 All keys: {all_keys_path}",
+        f"📄 Batch {batch_num}: {json_path}\n"
+        f"📝 API Keys: {txt_path}",
         title="📊 Final Results",
         border_style="green" if ok > 0 else "red"
     ))
