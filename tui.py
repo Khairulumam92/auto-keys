@@ -359,7 +359,12 @@ def run_pipeline_semi_auto(accounts: list[Account], cfg: dict, start_time: float
     opts.add_argument("--window-size=1280,900")
     opts.add_argument("--lang=en-US,en")
 
-    driver = uc.Chrome(options=opts)
+    from chrome_detect import detect_chrome_version
+    ver = detect_chrome_version()
+    kwargs = {"options": opts}
+    if ver:
+        kwargs["version_main"] = ver
+    driver = uc.Chrome(**kwargs)
     timeout = cfg.get("timeout", 180)
 
     try:

@@ -41,7 +41,12 @@ def create_driver(headless: bool = True) -> uc.Chrome:
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1280,900")
     opts.add_argument("--lang=en-US,en")
-    return uc.Chrome(options=opts)
+    from chrome_detect import detect_chrome_version
+    ver = detect_chrome_version()
+    kwargs = {"options": opts}
+    if ver:
+        kwargs["version_main"] = ver
+    return uc.Chrome(**kwargs)
 
 
 def wait_for_recaptcha(driver, timeout: int = 120) -> bool:
