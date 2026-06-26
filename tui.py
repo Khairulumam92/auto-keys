@@ -37,6 +37,7 @@ console = Console()
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 DEFAULT_CONFIG = {
+    "platform": "xiaomi",
     "count": 45,
     "password": "***",
     "mode": "semi-auto",
@@ -348,6 +349,39 @@ def stage_create_apikey(acc: Account):
 # ═══════════════════════════════════════════════════════════════
 #  PIPELINE RUNNERS
 # ═══════════════════════════════════════════════════════════════
+def run_qwen_pipeline(accounts: list[Account], cfg: dict, start_time: float):
+    """Qwen Cloud pipeline — fully automated (no CAPTCHA, email verify only)."""
+    import qwen_selenium
+
+    results = qwen_selenium.batch_register(
+        count=len(accounts),
+        password=cfg["password"],
+        headless=cfg.get("headless", False),
+        verbose=False,
+    )
+
+    # Map results back to Account objects
+    for i, result in enumerate(results):
+        if i >= len(accounts):
+            break
+        acc = accounts[i]
+        acc.email = result.get("email", "")
+        acc.password = result.get("password", cfg["password"])
+        acc.cookies = result.get("cookies", {})
+        acc.api_keys = result.get("api_keys", [])
+        acc.created_at = result.get("created_at", "")
+
+        status = result.get("status", "failed")
+        if status == "success":
+            acc.status = Status.SUCCESS
+        elif status == "registered_no_key":
+            acc.status = Status.APIKEY
+            acc.error = "registered but no API key"
+        else:
+            acc.status = Status.FAILED
+            acc.error = result.get("error", "unknown error")
+
+
 def run_pipeline_semi_auto(accounts: list[Account], cfg: dict, start_time: float):
     import undetected_chromedriver as uc
 
@@ -421,6 +455,7 @@ def show_main_menu(cfg: dict):
     tbl = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
     tbl.add_column("Setting", style="bold")
     tbl.add_column("Value")
+    tbl.add_row("Platform", f"[bright_magenta]{cfg.get('platform', 'xiaomi')}[/bright_magenta]")
     tbl.add_row("Accounts", f"[cyan]{cfg['count']}[/cyan]")
     tbl.add_row("Password", f"[dim]{cfg['password']}[/dim]")
     tbl.add_row("Mode", f"[yellow]{cfg['mode']}[/yellow]")
@@ -437,14 +472,15 @@ def show_main_menu(cfg: dict):
     menu.add_column("#", style="bold cyan", width=3)
     menu.add_column("Action")
     menu.add_row("1", "🚀 Start batch generation")
-    menu.add_row("2", "⚙️  Change account count")
-    menu.add_row("3", "🔑 Change password")
-    menu.add_row("4", "📦 Change mode (semi-auto / auto / cookies)")
-    menu.add_row("5", "🖥️  Toggle headless browser")
-    menu.add_row("6", "📁 Change output directory")
-    menu.add_row("7", "⏱  Change CAPTCHA timeout")
-    menu.add_row("8", "📊 View previous batches")
-    menu.add_row("9", "📧 Generate disposable emails only")
+    menu.add_row("2", "🎯 Change platform (xiaomi / qwen)")
+    menu.add_row("3", "⚙️  Change account count")
+    menu.add_row("4", "🔑 Change password")
+    menu.add_row("5", "📦 Change mode (semi-auto / auto / cookies)")
+    menu.add_row("6", "🖥️  Toggle headless browser")
+    menu.add_row("7", "📁 Change output directory")
+    menu.add_row("8", "⏱  Change CAPTCHA timeout")
+    menu.add_row("9", "📊 View previous batches")
+    menu.add_row("a", "📧 Generate disposable emails only")
     menu.add_row("0", "🚪 Exit")
     console.print(menu)
     console.print()
@@ -464,6 +500,16 @@ def setting_change_password(cfg: dict):
     cfg["password"] = new_pass
     save_config(cfg)
     console.print(f"[green]✅ Password updated[/green]")
+
+
+def setting_change_platform(cfg: dict):
+    console.print(f"\n[dim]Current: {cfg.get('platform', 'xiaomi')}[/dim]")
+    console.print("  [cyan]1[/cyan] xiaomi  — Xiaomi MiMo (reCAPTCHA v2, semi-auto)")
+    console.print("  [cyan]2[/cyan] qwen    — Qwen Cloud (email verify only, full auto)")
+    choice = Prompt.ask("Select platform", choices=["1", "2"], default="1")
+    cfg["platform"] = "xiaomi" if choice == "1" else "qwen"
+    save_config(cfg)
+    console.print(f"[green]✅ Platform set to {cfg['platform']}[/green]")
 
 
 def setting_change_mode(cfg: dict):
@@ -598,7 +644,9 @@ def action_start_batch(cfg: dict):
         bg = threading.Thread(target=updater, daemon=True)
         bg.start()
 
-        if cfg["mode"] == "semi-auto":
+        if cfg.get("platform") == "qwen":
+            run_qwen_pipeline(accounts, cfg, start_time)
+        elif cfg["mode"] == "semi-auto":
             run_pipeline_semi_auto(accounts, cfg, start_time)
         else:
             console.print("[red]Auto/cookies mode — use CLI directly: python cli.py generate -p xiaomi -c N[/red]")
@@ -639,25 +687,27 @@ def interactive_menu():
 
     while True:
         show_main_menu(cfg)
-        choice = Prompt.ask("Select option", choices=["0","1","2","3","4","5","6","7","8","9"], default="1")
+        choice = Prompt.ask("Select option", choices=["0","1","2","3","4","5","6","7","8","9","a"], default="1")
 
         if choice == "1":
             action_start_batch(cfg)
         elif choice == "2":
-            setting_change_count(cfg)
+            setting_change_platform(cfg)
         elif choice == "3":
-            setting_change_password(cfg)
+            setting_change_count(cfg)
         elif choice == "4":
-            setting_change_mode(cfg)
+            setting_change_password(cfg)
         elif choice == "5":
-            setting_toggle_headless(cfg)
+            setting_change_mode(cfg)
         elif choice == "6":
-            setting_change_output(cfg)
+            setting_toggle_headless(cfg)
         elif choice == "7":
-            setting_change_timeout(cfg)
+            setting_change_output(cfg)
         elif choice == "8":
-            view_batches(cfg)
+            setting_change_timeout(cfg)
         elif choice == "9":
+            view_batches(cfg)
+        elif choice == "a":
             action_generate_emails(cfg)
         elif choice == "0":
             console.print("\n[dim]👋 Bye![/dim]\n")
