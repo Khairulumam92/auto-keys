@@ -1,0 +1,11 @@
+{
+  "count": 10,
+  "password": "***",
+  "mode": "semi-auto",
+  "headless": false,
+  "output_dir": "output",
+  "solver": null,
+  "solver_key": null,
+  "cookies_file": null,
+  "timeout": 180
+}
