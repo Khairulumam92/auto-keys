@@ -47,6 +47,10 @@ DEFAULT_CONFIG = {
     "solver_key": None,
     "cookies_file": None,
     "timeout": 180,
+    "resume": False,
+    "censor": False,
+    "gmail_otp": False,
+    "gmail_address": "",
 }
 
 
@@ -458,7 +462,10 @@ def show_main_menu(cfg: dict):
     tbl.add_row("Platform", f"[bright_magenta]{cfg.get('platform', 'xiaomi')}[/bright_magenta]")
     tbl.add_row("Accounts", f"[cyan]{cfg['count']}[/cyan]")
     tbl.add_row("Password", f"[dim]{cfg['password']}[/dim]")
-    tbl.add_row("Mode", f"[yellow]{cfg['mode']}[/yellow]")
+    tbl.add_row("Timeout", f"[yellow]{cfg["timeout"]}s[/yellow]")
+    tbl.add_row("Resume", f"[bright_cyan]{"ON" if cfg.get("resume") else "OFF"}[/bright_cyan]")
+    tbl.add_row("Censor", f"[bright_cyan]{"ON" if cfg.get("censor") else "OFF"}[/bright_cyan]")
+    tbl.add_row("Gmail OTP", f"[bright_cyan]{"ON" if cfg.get("gmail_otp") else "OFF"}[/bright_cyan]")
     tbl.add_row("Headless", f"{'Yes' if cfg['headless'] else 'No'}")
     tbl.add_row("Output Dir", cfg["output_dir"])
     tbl.add_row("CAPTCHA Timeout", f"{cfg['timeout']}s")
@@ -481,6 +488,9 @@ def show_main_menu(cfg: dict):
     menu.add_row("8", "⏱  Change CAPTCHA timeout")
     menu.add_row("9", "📊 View previous batches")
     menu.add_row("a", "📧 Generate disposable emails only")
+    menu.add_row("b", "🔄 Toggle auto-resume (login existing → API key)")
+    menu.add_row("c", "🔒 Toggle censor mode (mask emails/keys)")
+    menu.add_row("d", "📬 Toggle Gmail OTP (vs disposable email)")
     menu.add_row("0", "🚪 Exit")
     console.print(menu)
     console.print()
@@ -709,6 +719,12 @@ def interactive_menu():
             view_batches(cfg)
         elif choice == "a":
             action_generate_emails(cfg)
+        elif choice == "b":
+            setting_change_resume(cfg)
+        elif choice == "c":
+            setting_change_censor(cfg)
+        elif choice == "d":
+            setting_change_gmail_otp(cfg)
         elif choice == "0":
             console.print("\n[dim]👋 Bye![/dim]\n")
             break
