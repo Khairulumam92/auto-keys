@@ -462,10 +462,13 @@ def show_main_menu(cfg: dict):
     tbl.add_row("Platform", f"[bright_magenta]{cfg.get('platform', 'xiaomi')}[/bright_magenta]")
     tbl.add_row("Accounts", f"[cyan]{cfg['count']}[/cyan]")
     tbl.add_row("Password", f"[dim]{cfg['password']}[/dim]")
-    tbl.add_row("Timeout", f"[yellow]{cfg["timeout"]}s[/yellow]")
-    tbl.add_row("Resume", f"[bright_cyan]{"ON" if cfg.get("resume") else "OFF"}[/bright_cyan]")
-    tbl.add_row("Censor", f"[bright_cyan]{"ON" if cfg.get("censor") else "OFF"}[/bright_cyan]")
-    tbl.add_row("Gmail OTP", f"[bright_cyan]{"ON" if cfg.get("gmail_otp") else "OFF"}[/bright_cyan]")
+    tbl.add_row("Timeout", f"[yellow]{cfg['timeout']}s[/yellow]")
+    resume_state = "ON" if cfg.get("resume") else "OFF"
+    censor_state = "ON" if cfg.get("censor") else "OFF"
+    gmail_state = "ON" if cfg.get("gmail_otp") else "OFF"
+    tbl.add_row("Resume", f"[bright_cyan]{resume_state}[/bright_cyan]")
+    tbl.add_row("Censor", f"[bright_cyan]{censor_state}[/bright_cyan]")
+    tbl.add_row("Gmail OTP", f"[bright_cyan]{gmail_state}[/bright_cyan]")
     tbl.add_row("Headless", f"{'Yes' if cfg['headless'] else 'No'}")
     tbl.add_row("Output Dir", cfg["output_dir"])
     tbl.add_row("CAPTCHA Timeout", f"{cfg['timeout']}s")
@@ -502,6 +505,40 @@ def setting_change_count(cfg: dict):
     cfg["count"] = int(new_count)
     save_config(cfg)
     console.print(f"[green]✅ Account count set to {cfg['count']}[/green]")
+
+
+
+
+
+def setting_change_resume(cfg: dict):
+    """Toggle auto-resume mode."""
+    cfg["resume"] = not cfg.get("resume", False)
+    save_config(cfg)
+    state = "[green]ON[/green]" if cfg["resume"] else "[red]OFF[/red]"
+    console.print(f"[green]\u2705 Auto-resume: {state}[/green]")
+    console.print("[dim]When ON: existing accounts will be logged in to harvest API keys[/dim]")
+
+
+def setting_change_censor(cfg: dict):
+    """Toggle censor mode."""
+    cfg["censor"] = not cfg.get("censor", False)
+    save_config(cfg)
+    state = "[green]ON[/green]" if cfg["censor"] else "[red]OFF[/red]"
+    console.print(f"[green]\u2705 Censor mode: {state}[/green]")
+    console.print("[dim]When ON: emails and API keys are masked in output[/dim]")
+
+
+def setting_change_gmail_otp(cfg: dict):
+    """Toggle Gmail OTP mode."""
+    cfg["gmail_otp"] = not cfg.get("gmail_otp", False)
+    if cfg["gmail_otp"] and not cfg.get("gmail_address"):
+        addr = Prompt.ask("Enter Gmail address for OTP polling")
+        cfg["gmail_address"] = addr
+    save_config(cfg)
+    state = "[green]ON[/green]" if cfg["gmail_otp"] else "[red]OFF[/red]"
+    console.print(f"[green]\u2705 Gmail OTP: {state}[/green]")
+    if cfg["gmail_otp"]:
+        console.print(f"[dim]Using Gmail: {cfg.get('gmail_address', 'not set')}[/dim]")
 
 
 def setting_change_password(cfg: dict):
